@@ -12,13 +12,19 @@ from contextlib import contextmanager
 from subprocess import call, DEVNULL
 import sqlite3
 import pathlib
+import subprocess
 
 
 SOCKDIR = os.environ.get("XDG_RUNTIME_DIR", "/var/tmp")
 SOCKFILE = os.path.join(SOCKDIR, "polypomo.sock")
-TOMATO = "\U0001F345"  # Recommended font: Noto Emoji
-BREAK = "\U0001F3D6"  # Recommended font: Noto Emoji
-PAUSE = "\U000023F8"  # Recommended font: Siji
+
+# These icons are available on Nerd Fonts:
+TOMATO = ""
+BREAK = ""
+# PAUSE = ""
+RED = "#FF6347"
+GREEN = "#7DD87D"
+GREY = "#CCCCCC"
 
 
 class Exit(Exception):
@@ -26,10 +32,11 @@ class Exit(Exception):
 
 
 class Timer:
-    def __init__(self, remtime):
+    def __init__(self, remtime, sound=None):
         self.time = remtime
         self.notified = False
         self.tick()
+        self.sound = sound  # Path to WAV
 
     def __str__(self):
         return self.format_time()
@@ -93,32 +100,62 @@ class Timer:
             except FileNotFoundError:
                 # Skip if notify-send isn't installed
                 pass
+            self.play_sound()
+
+    def play_sound(self):
+        if not self.sound:
+            return
+
+        try:
+            subprocess.Popen(
+                ['aplay', self.sound, '-q'],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            pass  # In case aplay is not installed
 
     def change(self, op, seconds):
         self.time = op(self.time, seconds)
 
 
 class Status:
-    def __init__(self, worktime, breaktime, saveto):
+    def __init__(self, worktime, breaktime, saveto, sound=None):
         self.worktime = worktime
         self.breaktime = breaktime
         self.status = "work"  # or "break"
-        self.timer = Timer(self.worktime)
+        self.timer = Timer(self.worktime, sound=sound)
         self.active = False
         self.locked = True
         self.saveto = saveto
 
     def show(self):
-        status = TOMATO if self.status == "work" else BREAK
+        if self.status == "work":
+            icon = TOMATO
+            color = RED
+        else:  # "break"
+            icon = BREAK
+            color = GREEN
         if not self.active:
-            status = PAUSE
-        sys.stdout.write("{} {}\n".format(status, self.timer))
+            color = GREY
+        color_tag_open = "%{F" + color + "}"
+        color_tag_close = "%{F-}"
+        # message = f"{color_tag_open}{status}  {self.timer}{color_tag_close}"
+        # sys.stdout.write(message)
+        sys.stdout.write("{}{}  {}{}\n".format(
+            color_tag_open, icon, self.timer, color_tag_close,
+        ))
         sys.stdout.flush()
 
     def toggle(self):
         self.active = not self.active
         if self.saveto and self.status == "work":
             self.save()
+
+    def reset(self):
+        self.active = False
+        self.status = "work"  # ready to be started again
+        self.timer = Timer(self.worktime)
 
     def toggle_lock(self):
         self.locked = not self.locked
@@ -266,8 +303,11 @@ def check_actions(sock, status):
         status.toggle()
     elif action == "end":
         status.next_timer()
+        status.toggle()  # By default, start the next timer running
     elif action == "lock":
         status.toggle_lock()
+    elif action == "reset":
+        status.reset()
     elif action.startswith("time"):
         _, op, seconds = action.split(" ")
         status.change(op, seconds)
@@ -278,7 +318,12 @@ def check_actions(sock, status):
 def action_display(args):
     # TODO logging = print("Running display", args)
 
-    status = Status(args.worktime, args.breaktime, args.saveto)
+    status = Status(
+        args.worktime,
+        args.breaktime,
+        args.saveto,
+        args.sound,
+    )
 
     # Listen on socket
     with setup_listener() as sock:
@@ -303,6 +348,12 @@ def action_end(args):
     # TODO logging = print("Running end", args)
     with setup_client() as s:
         msg = "end"
+        s.send(msg.encode("utf8"))
+
+
+def action_reset(args):
+    with setup_client() as s:
+        msg = "reset"
         s.send(msg.encode("utf8"))
 
 
@@ -365,11 +416,15 @@ def parse_args():
     parser.add_argument(
         "--breaktime",
         type=int,
-        default=3 * 60,
+        default=5 * 60,
         help="Default break timer time in seconds",
     )
     parser.add_argument(
         "--saveto", type=pathlib.Path, default=None, help="Path to database"
+    )
+    parser.add_argument(
+        "--sound", type=str, default=None,
+        help="Path to WAV sound to play each time the timer ends."
     )
     parser.set_defaults(func=action_display)
 
@@ -382,6 +437,10 @@ def parse_args():
     # end timer
     end = sub.add_parser("end", help="end current timer")
     end.set_defaults(func=action_end)
+
+    # reset timer
+    reset = sub.add_parser("reset", help="reset the timer")
+    reset.set_defaults(func=action_reset)
 
     # lock timer changes
     lock = sub.add_parser("lock", help="lock time actions - prevent changing time")
