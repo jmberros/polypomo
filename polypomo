@@ -32,12 +32,9 @@ class Exit(Exception):
 
 
 class Timer:
-    def __init__(self, remtime, sound=None, icon=None):
+    def __init__(self, remtime):
         self.time = remtime
-        self.notified = False
         self.tick()
-        self.sound = sound  # Path to WAV
-        self.icon = icon  # Path to icon (PNG)
 
     def __str__(self):
         return self.format_time()
@@ -81,11 +78,108 @@ class Timer:
         delta = now - self.previous
         self.time -= delta
 
-        # Send a notification when timer reaches 0
-        if not self.notified and self.time < 0:
-            self.notified = True
+    @property
+    def is_completed(self):
+        return self.time < 0
+
+    def change(self, op, seconds):
+        self.time = op(self.time, seconds)
+
+
+class Status:
+    def __init__(self, worktime, breaktime, saveto, sound=None, icon=None):
+        self.worktime = worktime
+        self.breaktime = breaktime
+        self.status = "work"  # or "break"
+        self.timer = Timer(self.worktime)
+        self.active = False
+        self.locked = True
+        self.saveto = saveto
+        self.sound = sound  # Path to WAV
+        self.icon = icon  # Path to icon (PNG)
+
+    def show(self):
+        if self.status == "work":
+            icon = TOMATO
+            color = RED
+        else:  # "break"
+            icon = BREAK
+            color = GREEN
+        if not self.active:
+            color = GREY
+        color_tag_open = "%{F" + color + "}"
+        color_tag_close = "%{F-}"
+        # message = f"{color_tag_open}{status}  {self.timer}{color_tag_close}"
+        # sys.stdout.write(message)
+        sys.stdout.write("{}{}  {}{}\n".format(
+            color_tag_open, icon, self.timer, color_tag_close,
+        ))
+        sys.stdout.flush()
+
+    def toggle(self):
+        self.active = not self.active
+        if self.saveto and self.status == "work":
+            self.save()
+
+    def reset(self):
+        self.active = False
+        self.status = "work"  # ready to be started again
+        self.timer = Timer(self.worktime)
+
+    def toggle_lock(self):
+        self.locked = not self.locked
+
+    def update(self):
+        if self.active:
+            self.timer.update()
+
+        if self.timer.is_completed:
             self.send_notification()
             self.play_sound()
+            self.next_timer(start_running=True)
+
+        # This ensures the timer counts time since the last iteration
+        # and not since it was initialized
+        self.timer.tick()
+
+    def change(self, op, seconds):
+        if self.locked:
+            return
+
+        seconds = int(seconds)
+        op = operator.add if op == "add" else operator.sub
+        self.timer.change(op, seconds)
+
+    def next_timer(self, start_running: bool = False):
+        if self.status == "work":
+            if self.active:
+                self.active = False
+                self.save()  # save before switching if toggle didn't get called
+            self.status = "break"
+            self.timer = Timer(self.breaktime)
+        elif self.status == "break":
+            self.status = "work"
+            self.timer = Timer(self.worktime)
+
+        self.active = start_running
+
+    def save(self):
+        if self.saveto:
+            with setup_conn(self.saveto) as conn:
+                if self.active:
+                    conn.execute(
+                        "INSERT INTO sessions VALUES (date('now'), time('now'), NULL)"
+                    )
+                else:
+                    conn.execute(
+                        """UPDATE sessions
+                           SET stop = time('now')
+                           WHERE start IN (
+                             SELECT start FROM sessions
+                             ORDER BY start DESC
+                             LIMIT 1)
+                        """
+                    )
 
     def send_notification(self):
         command = [
@@ -115,100 +209,6 @@ class Timer:
             )
         except FileNotFoundError:
             pass  # In case aplay is not installed
-
-    def change(self, op, seconds):
-        self.time = op(self.time, seconds)
-
-
-class Status:
-    def __init__(self, worktime, breaktime, saveto, sound=None, icon=None):
-        self.worktime = worktime
-        self.breaktime = breaktime
-        self.status = "work"  # or "break"
-        self.timer_args = dict(sound=sound, icon=icon)
-        self.timer = self.timer_factory(self.worktime)
-        self.active = False
-        self.locked = True
-        self.saveto = saveto
-
-    def show(self):
-        if self.status == "work":
-            icon = TOMATO
-            color = RED
-        else:  # "break"
-            icon = BREAK
-            color = GREEN
-        if not self.active:
-            color = GREY
-        color_tag_open = "%{F" + color + "}"
-        color_tag_close = "%{F-}"
-        # message = f"{color_tag_open}{status}  {self.timer}{color_tag_close}"
-        # sys.stdout.write(message)
-        sys.stdout.write("{}{}  {}{}\n".format(
-            color_tag_open, icon, self.timer, color_tag_close,
-        ))
-        sys.stdout.flush()
-
-    def toggle(self):
-        self.active = not self.active
-        if self.saveto and self.status == "work":
-            self.save()
-
-    def reset(self):
-        self.active = False
-        self.status = "work"  # ready to be started again
-        self.timer = self.timer_factory(self.worktime)
-
-    def toggle_lock(self):
-        self.locked = not self.locked
-
-    def update(self):
-        if self.active:
-            self.timer.update()
-        # This ensures the timer counts time since the last iteration
-        # and not since it was initialized
-        self.timer.tick()
-
-    def change(self, op, seconds):
-        if self.locked:
-            return
-
-        seconds = int(seconds)
-        op = operator.add if op == "add" else operator.sub
-        self.timer.change(op, seconds)
-
-    def next_timer(self):
-        if self.status == "work":
-            if self.active:
-                self.active = False
-                self.save()  # save before switching if toggle didn't get called
-            self.status = "break"
-            self.timer = self.timer_factory(self.breaktime)
-        elif self.status == "break":
-            self.active = False
-            self.status = "work"
-            self.timer = self.timer_factory(self.worktime)
-
-    def timer_factory(self, time):
-        return Timer(time, **self.timer_args)
-
-    def save(self):
-        if self.saveto:
-            with setup_conn(self.saveto) as conn:
-                if self.active:
-                    conn.execute(
-                        "INSERT INTO sessions VALUES (date('now'), time('now'), NULL)"
-                    )
-                else:
-                    conn.execute(
-                        """UPDATE sessions
-                           SET stop = time('now')
-                           WHERE start IN (
-                             SELECT start FROM sessions
-                             ORDER BY start DESC
-                             LIMIT 1)
-                        """
-                    )
 
 
 @contextmanager
