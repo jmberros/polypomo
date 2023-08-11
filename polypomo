@@ -32,11 +32,12 @@ class Exit(Exception):
 
 
 class Timer:
-    def __init__(self, remtime, sound=None):
+    def __init__(self, remtime, sound=None, icon=None):
         self.time = remtime
         self.notified = False
         self.tick()
         self.sound = sound  # Path to WAV
+        self.icon = icon  # Path to icon (PNG)
 
     def __str__(self):
         return self.format_time()
@@ -83,29 +84,29 @@ class Timer:
         # Send a notification when timer reaches 0
         if not self.notified and self.time < 0:
             self.notified = True
-            try:
-                call(
-                    [
-                        "notify-send",
-                        "-t",
-                        "0",
-                        "-u",
-                        "critical",
-                        "Pomodoro",
-                        "Timer reached zero",
-                    ],
-                    stdout=DEVNULL,
-                    stderr=DEVNULL,
-                )
-            except FileNotFoundError:
-                # Skip if notify-send isn't installed
-                pass
+            self.send_notification()
             self.play_sound()
+
+    def send_notification(self):
+        command = [
+            "notify-send",
+            "-t",
+            str(60 * 1000),  # Milliseconds to expire
+            "-u",
+            "normal",
+            "-i",
+            self.icon,
+            "Pomodoro",
+            "Timer reached zero",
+        ]
+        try:
+            call(command, stdout=DEVNULL, stderr=DEVNULL)
+        except FileNotFoundError:
+            pass  # Skip if notify-send isn't installed
 
     def play_sound(self):
         if not self.sound:
             return
-
         try:
             subprocess.Popen(
                 ['aplay', self.sound, '-q'],
@@ -120,11 +121,12 @@ class Timer:
 
 
 class Status:
-    def __init__(self, worktime, breaktime, saveto, sound=None):
+    def __init__(self, worktime, breaktime, saveto, sound=None, icon=None):
         self.worktime = worktime
         self.breaktime = breaktime
         self.status = "work"  # or "break"
-        self.timer = Timer(self.worktime, sound=sound)
+        self.timer_args = dict(sound=sound, icon=icon)
+        self.timer = self.timer_factory(self.worktime)
         self.active = False
         self.locked = True
         self.saveto = saveto
@@ -155,7 +157,7 @@ class Status:
     def reset(self):
         self.active = False
         self.status = "work"  # ready to be started again
-        self.timer = Timer(self.worktime)
+        self.timer = self.timer_factory(self.worktime)
 
     def toggle_lock(self):
         self.locked = not self.locked
@@ -181,11 +183,14 @@ class Status:
                 self.active = False
                 self.save()  # save before switching if toggle didn't get called
             self.status = "break"
-            self.timer = Timer(self.breaktime)
+            self.timer = self.timer_factory(self.breaktime)
         elif self.status == "break":
             self.active = False
             self.status = "work"
-            self.timer = Timer(self.worktime)
+            self.timer = self.timer_factory(self.worktime)
+
+    def timer_factory(self, time):
+        return Timer(time, **self.timer_args)
 
     def save(self):
         if self.saveto:
@@ -323,6 +328,7 @@ def action_display(args):
         args.breaktime,
         args.saveto,
         args.sound,
+        args.icon,
     )
 
     # Listen on socket
@@ -420,11 +426,18 @@ def parse_args():
         help="Default break timer time in seconds",
     )
     parser.add_argument(
-        "--saveto", type=pathlib.Path, default=None, help="Path to database"
+        "--saveto", type=pathlib.Path,
+        default=None,
+        help="Path to database"
     )
     parser.add_argument(
-        "--sound", type=str, default=None,
+        "--sound", type=str,
+        default=None,
         help="Path to WAV sound to play each time the timer ends."
+    )
+    parser.add_argument(
+        "--icon", type=str, default=None,
+        help="Path to PNG icon of a tomato."
     )
     parser.set_defaults(func=action_display)
 
@@ -451,7 +464,6 @@ def parse_args():
         "exit", help="exit any listening polypomo instances gracefully"
     )
     exit.set_defaults(func=action_exit)
-
     # change timer
     time = sub.add_parser("time", help="add/remove time to current timer")
     time.add_argument(
