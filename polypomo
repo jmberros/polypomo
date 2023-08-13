@@ -302,7 +302,7 @@ def check_actions(sock, status):
 
     if not data:
         return
-
+    
     action = data.decode("utf8")
     if action == "toggle":
         status.toggle()
@@ -330,12 +330,12 @@ def action_display(args):
         args.sound,
         args.icon,
     )
-
     # Listen on socket
     with setup_listener() as sock:
         while True:
             status.show()
             status.update()
+            
             try:
                 check_actions(sock, status)
             except Exit:
