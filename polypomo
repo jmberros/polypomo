@@ -24,7 +24,7 @@ BREAK = ""
 # PAUSE = ""
 RED = "#FF6347"
 GREEN = "#7DD87D"
-GREY = "#CCCCCC"
+GREY = "#707880"
 
 
 class Exit(Exception):
